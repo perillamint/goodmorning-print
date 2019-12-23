@@ -1,0 +1,20 @@
+menu "CalDAV Configuration"
+
+    config CALDAV_URL
+        string "CalDAV URL"
+        default "example.com"
+        help
+            CalDAV URL
+
+    config CALDAV_USERNAME
+        string "CalDAV username"
+        default "username"
+        help
+            CalDAV username
+
+    config CALDAV_PASSWORD
+        string "CalDAV password"
+        default "Pa$$w0rd!"
+        help
+            CalDAV access password
+endmenu
