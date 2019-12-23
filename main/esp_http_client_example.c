@@ -18,6 +18,7 @@
 #include "esp_netif.h"
 #include "protocol_examples_common.h"
 #include "esp_tls.h"
+#include "esp_sntp.h"
 #include "dumpcode.h"
 #include "printer.h"
 
@@ -107,7 +108,6 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             break;
         case HTTP_EVENT_ON_HEADER:
             ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
-	    caldav_init();
             break;
         case HTTP_EVENT_ON_DATA:
             ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
@@ -148,7 +148,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static void https_with_url(void)
+static void fetch_caldav(void)
 {
     char *buffer = malloc(MAX_HTTP_RECV_BUFFER + 1);
     if (buffer == NULL) {
@@ -165,8 +165,21 @@ static void https_with_url(void)
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     char post_data[512];
-    //snprintf(post_data, 512, "<c:calendar-query xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:prop xmlns:d=\"DAV:\"><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name=\"VCALENDAR\"><c:comp-filter name=\"VEVENT\"><c:time-range start=\"%s\" end=\"%s\"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>", "20181125T150000Z", "20190106T150000Z");
-    snprintf(post_data, 512, "<c:calendar-query xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:prop xmlns:d=\"DAV:\"><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name=\"VCALENDAR\"><c:comp-filter name=\"VEVENT\"><c:time-range start=\"%s\" end=\"%s\"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>", "20191220T150000Z", "20191226T150000Z");
+    //snprintf(post_data, 512, "<c:calendar-query xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:prop xmlns:d=\"DAV:\"><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name=\"VCALENDAR\"><c:comp-filter name=\"VEVENT\"><c:time-range start=\"%s\" end=\"%s\"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>", "20191220T150000Z", "20191226T150000Z");
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    snprintf(post_data, 512, "<c:calendar-query xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:prop xmlns:d=\"DAV:\"><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name=\"VCALENDAR\"><c:comp-filter name=\"VEVENT\"><c:time-range start=\"%04d%02d%02dT%sZ\" end=\"%04d%02d%02dT%sZ\"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>",
+		    timeinfo.tm_year + 1900,
+		    timeinfo.tm_mon + 1,
+		    timeinfo.tm_mday - 1,
+		    "180000",
+		    timeinfo.tm_year + 1900,
+		    timeinfo.tm_mon + 1,
+		    timeinfo.tm_mday,
+		    "180000"
+		    );
     esp_http_client_set_method(client, HTTP_METHOD_REPORT);
     esp_http_client_set_header(client, "Depth", "1");
     esp_http_client_set_header(client, "Content-Type", "application/xml; charset=utf-8");
@@ -184,12 +197,26 @@ static void https_with_url(void)
     esp_http_client_cleanup(client);
 }
 
-static void http_test_task(void *pvParameters)
+static void caldav_task(void *pvParameters)
 {
-    https_with_url();
+    char msgbuf[512];
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    time(&now);
+    localtime_r(&now, &timeinfo);
 
-    ESP_LOGI(TAG, "Finish http example");
+    snprintf(msgbuf, 512, "%04d-%02d-%02dT%02d:%02d:%02d, 좋은 아침입니다.", timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    println(msgbuf);
+    print_feed(3);
+    caldav_init();
+    fetch_caldav();
+
     vTaskDelete(NULL);
+}
+
+void time_sync_notification_cb(struct timeval *tv)
+{
+    ESP_LOGI(TAG, "Notification of a time synchronization event");
 }
 
 void app_main(void)
@@ -204,6 +231,8 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     printer_init();
+    setenv("TZ", "KST-9", 1);
+    tzset();
 
     /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
      * Read "Establishing Wi-Fi or Ethernet Connection" section in
@@ -212,5 +241,26 @@ void app_main(void)
     ESP_ERROR_CHECK(example_connect());
     ESP_LOGI(TAG, "Connected to AP, begin http example");
 
-    xTaskCreate(&http_test_task, "http_test_task", 8192, NULL, 5, NULL);
+    ESP_LOGI(TAG, "Initializing SNTP");
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "1.kr.pool.ntp.org");
+    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    sntp_init();
+
+    // wait for time to be set
+
+    int retry = 0;
+    const int retry_count = 10;
+    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    printf("Now: %ld\n", now);
+
+    xTaskCreate(&caldav_task, "caldav_task", 8192, NULL, 5, NULL);
 }
